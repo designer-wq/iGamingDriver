@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "predeploy": "npm run build",
+    "predeploy": "GITHUB_PAGES=true npm run build",
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {
@@ -18,7 +18,8 @@
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react-dom": "^19.2.3",
+    "react-ga4": "^2.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

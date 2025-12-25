@@ -6,6 +6,7 @@ import { FileAsset, ViewState, User, UserRole, Provider, Game, AssetFolder } fro
 import { supabase } from './services/supabaseClient';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import ReactGA from 'react-ga4';
 
 
 
@@ -55,38 +56,75 @@ function App() {
 
     // --- Carregamento Inicial de Dados ---
     useEffect(() => {
+        // Initialize Google Analytics
+        const gaId = import.meta.env.VITE_GA_MEASUREMENT_ID;
+        if (gaId) {
+            ReactGA.initialize(gaId);
+            console.log('📊 Google Analytics Initialized');
+        }
+
         const loadData = async () => {
             try {
                 // Sequência inicial de boot
+                console.log('🚀 Boot: Starting loadData...');
 
-                const { data: { session } } = await supabase.auth.getSession();
-                if (session?.user) {
-                    const profile = await fetchUserProfile(session.user.id);
-                    if (profile) setCurrentUser(profile);
+                let userRole = 'guest';
+                console.log('🚀 Boot: Checking session...');
+
+                let session = null;
+                try {
+                    const sessionResult = await supabase.auth.getSession();
+                    session = sessionResult.data.session;
+                    console.log('🚀 Boot: Session:', session ? 'Found' : 'Null');
+                } catch (sessionErr) {
+                    console.error('⚠️ Boot: Session check failed (ignoring):', sessionErr);
                 }
 
+                if (session?.user) {
+                    try {
+                        console.log('🚀 Boot: Fetching user profile...');
+                        const profile = await fetchUserProfile(session.user.id);
+                        console.log('🚀 Boot: Profile result:', profile);
+                        if (profile) {
+                            setCurrentUser(profile);
+                            userRole = profile.role;
+                        }
+                    } catch (profileErr) {
+                        console.error('⚠️ Boot: Profile fetch failed:', profileErr);
+                    }
+                }
+
+                console.log('🚀 Boot: Fetching providers...');
                 const data = await fetchProviders();
+                console.log(`🚀 Boot: Providers fetched (${data.length})`);
                 setProviders(data);
 
                 // Load recent games (top 8)
+                console.log('🚀 Boot: Fetching recent games...');
                 const recents = await fetchRecentGames(8);
+                console.log(`🚀 Boot: Recent games fetched (${recents.length})`);
                 setRecentGames(recents);
 
                 // Load persisted Drive Link
+                console.log('🚀 Boot: Fetching drive link setting...');
                 const savedLink = await fetchSetting('drive_root_link');
+                console.log('🚀 Boot: Settings fetched:', savedLink);
                 if (savedLink) {
                     setDriveLink(savedLink);
 
                     // MOVED TO BACKGROUND: Don't await this here to avoid blocking the initial render
-                    const folderId = extractFolderId(savedLink);
-                    if (folderId) {
-                        console.log('⚡ Agendando sincronização em segundo plano pós-refresh...');
-                        // No await here
-                        syncStructureFromDrive(folderId).then(async () => {
-                            const freshData = await fetchProviders();
-                            setProviders(freshData);
-                            console.log('⚡ Sincronização de fundo concluída.');
-                        }).catch(err => console.error('Erro na sincronização de fundo:', err));
+                    // ONLY run if user is admin
+                    if (userRole === 'admin') {
+                        const folderId = extractFolderId(savedLink);
+                        if (folderId) {
+                            console.log('⚡ Agendando sincronização em segundo plano pós-refresh...');
+                            // No await here
+                            syncStructureFromDrive(folderId).then(async () => {
+                                const freshData = await fetchProviders();
+                                setProviders(freshData);
+                                console.log('⚡ Sincronização de fundo concluída.');
+                            }).catch(err => console.error('Erro na sincronização de fundo:', err));
+                        }
                     }
                 }
 
@@ -98,6 +136,7 @@ function App() {
                 console.error("Boot error:", error);
             } finally {
                 // Priority: Show the app as soon as basic providers are loaded
+                console.log('🚀 Boot: Finished. Setting AppReady true.');
                 setIsAppReady(true);
             }
         };
@@ -117,15 +156,28 @@ function App() {
             }
         });
 
+        // Safety timeout to prevent infinite loading
+        const safetyTimeout = setTimeout(() => {
+            setIsAppReady(prev => {
+                if (!prev) {
+                    console.warn("⚠️ Boot timeout: Force-enabling AppReady.");
+                    return true;
+                }
+                return prev;
+            });
+        }, 10000); // 10 seconds timeout
+
         return () => {
             subscription.unsubscribe();
+            clearTimeout(safetyTimeout);
         };
     }, []);
 
 
     // --- Lógica de Sincronização Automática em Segundo Plano ---
     useEffect(() => {
-        if (!isAppReady || !driveLink || driveLink.includes('root')) return;
+        const isUserAdmin = currentUser?.role === 'admin';
+        if (!isAppReady || !driveLink || driveLink.includes('root') || !isUserAdmin) return;
 
         const silentSync = async () => {
             const folderId = extractFolderId(driveLink);
@@ -143,7 +195,7 @@ function App() {
 
         const interval = setInterval(silentSync, 1000 * 30); // Sincroniza a cada 30 segundos
         return () => clearInterval(interval);
-    }, [isAppReady, driveLink, dbLoading]);
+    }, [isAppReady, driveLink, dbLoading, currentUser]);
 
     // --- Auxiliares de Permissão do Usuário ---
     const isAdmin = currentUser?.role === 'admin';
@@ -251,11 +303,33 @@ function App() {
         return () => clearTimeout(delayDebounceFn);
     }, [sidebarSearchQuery, view.type]);
 
-    // --- Reseta as pesquisas ao mudar de visualização ---
+    // --- Reseta as pesquisas e Rastreia PageView ao mudar de visualização ---
     useEffect(() => {
         setFolderSearchQuery('');
         setGameSearchQuery('');
         setProviderSearchQuery('');
+
+        // GA Tracking
+        if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
+            let path = '/';
+            let title = 'Home';
+
+            if (view.type === 'provider') {
+                path = `/provider/${view.providerId}`;
+                title = 'Provider View';
+            } else if (view.type === 'game') {
+                path = `/game/${(view as any).gameId}`;
+                title = 'Game View';
+            } else if (view.type === 'folder') {
+                path = `/folder/${(view as any).folderId}`;
+                title = 'Folder View';
+            } else if (view.type === 'settings') {
+                path = '/settings';
+                title = 'Settings';
+            }
+
+            ReactGA.send({ hitType: "pageview", page: path, title: title });
+        }
     }, [view]);
 
     // --- Carregamento Lazy ("preguiçoso") de Jogos ---
@@ -432,6 +506,16 @@ function App() {
             saveAs(content, `${folder.name}.zip`);
             console.log('✅ Download ZIP concluído!');
 
+            // Track Download
+            if (import.meta.env.VITE_GA_MEASUREMENT_ID) {
+                ReactGA.event({
+                    category: "Assets",
+                    action: "Download Folder",
+                    label: folder.name,
+                    value: files.length
+                });
+            }
+
         } catch (error) {
             console.error('Erro no processo de download:', error);
             alert('Erro ao gerar o ZIP.');
@@ -442,6 +526,11 @@ function App() {
     };
 
     const handleSyncDrive = async () => {
+        if (!isAdmin) {
+            alert('Apenas administradores podem realizar a sincronização.');
+            return;
+        }
+
         const folderId = extractFolderId(driveLink);
         if (!folderId) {
             alert('Por favor, insira um link válido de pasta do Google Drive.');
